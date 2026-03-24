@@ -21,10 +21,9 @@ interface Trade {
   entry_price: number;
   position_size: number;
   stop_loss: number;
+  take_profit: number;
   status: string;
   pnl: number;
-  angular_momentum: number;
-  torque: number;
 }
 
 interface News {
@@ -156,6 +155,7 @@ export default function App() {
                     <th className="pb-3 font-medium">Type</th>
                     <th className="pb-3 font-medium">Entry</th>
                     <th className="pb-3 font-medium">Stop Loss</th>
+                    <th className="pb-3 font-medium">Take Profit</th>
                     <th className="pb-3 font-medium">Status</th>
                     <th className="pb-3 font-medium text-right">PnL</th>
                   </tr>
@@ -172,6 +172,7 @@ export default function App() {
                       </td>
                       <td className="py-3 font-mono">\${trade.entry_price.toFixed(2)}</td>
                       <td className="py-3 font-mono text-gray-400">\${trade.stop_loss.toFixed(2)}</td>
+                      <td className="py-3 font-mono text-gray-400">\${trade.take_profit.toFixed(2)}</td>
                       <td className="py-3">
                         <span className={`px-2 py-1 rounded text-xs ${trade.status === 'OPEN' ? 'bg-blue-500/10 text-blue-500' : 'bg-gray-500/10 text-gray-400'}`}>
                           {trade.status}

@@ -1,10 +1,9 @@
 import Parser from 'rss-parser';
 import YahooFinance from 'yahoo-finance2';
 import { GoogleGenAI, Type } from '@google/genai';
-import { initDB, getPortfolio, updatePortfolio, insertNews, insertTrade, getOpenTrades, closeTrade } from './database';
+import { initDB, getPortfolio, updatePortfolio, insertNews, insertTrade, getOpenTrades, closeTrade, newsExists } from './database';
 
 const parser = new Parser();
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 const yahooFinance = new YahooFinance();
 
 const KEYWORDS = ['Iran', 'USA', 'Hormuz', 'Oil', 'War', 'Sanctions', 'Tariff', 'Geopolitics', 'China', 'Russia', 'Middle East'];
@@ -35,8 +34,9 @@ async function getSentiment(title: string): Promise<number> {
         if (!process.env.GEMINI_API_KEY) {
             throw new Error("API key missing");
         }
+        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
         const response = await ai.models.generateContent({
-            model: 'gemini-3.1-flash-preview',
+            model: 'gemini-3.1-pro-preview',
             contents: `Analyze the financial sentiment of this geopolitical news headline. Return ONLY a JSON object with a 'score' between -1.0 (very negative) and 1.0 (very positive). Headline: "${title}"`,
             config: {
                 responseMimeType: "application/json",
@@ -86,11 +86,15 @@ async function getMarketData(symbol: string) {
 
         // Calculate SMA (Simple Moving Average)
         const sma = mean;
-
-        // Calculate Velocity (v)
         const currentPrice = quote.regularMarketPrice || closes[closes.length - 1] || 0;
-        const yesterdayPrice = closes[closes.length - 2] || currentPrice;
-        const velocity = yesterdayPrice ? (currentPrice - yesterdayPrice) / yesterdayPrice : 0;
+
+        // Calculate 5-day EMA for Velocity
+        let ema = closes[0];
+        const k = 2 / (5 + 1);
+        for (let i = 1; i < closes.length; i++) {
+            ema = (closes[i] * k) + (ema * (1 - k));
+        }
+        const velocity = ema ? (currentPrice - ema) / ema : 0;
 
         // Calculate Normalized Distance (r)
         const r = sma ? (currentPrice - sma) / sma : 0;
@@ -123,10 +127,9 @@ export async function runCycle() {
             if (trade.sentiment > 0 && currentPrice <= trade.stop_loss) closePosition = true; // Long stopped out
             if (trade.sentiment < 0 && currentPrice >= trade.stop_loss) closePosition = true; // Short stopped out
             
-            // Take profit (simplified: 2x risk)
-            const risk = Math.abs(trade.entry_price - trade.stop_loss);
-            if (trade.sentiment > 0 && currentPrice >= trade.entry_price + (risk * 2)) closePosition = true;
-            if (trade.sentiment < 0 && currentPrice <= trade.entry_price - (risk * 2)) closePosition = true;
+            // Take profit
+            if (trade.sentiment > 0 && currentPrice >= trade.take_profit) closePosition = true;
+            if (trade.sentiment < 0 && currentPrice <= trade.take_profit) closePosition = true;
 
             if (closePosition) {
                 const pnl = trade.sentiment > 0 
@@ -144,13 +147,15 @@ export async function runCycle() {
     }
 
     // 2. Ingest News & Execute New Trades
+    const MAX_OPEN_POSITIONS = 5;
+    const MAX_PORTFOLIO_EXPOSURE = 0.5; // 50% max exposure
+
     for (const feedUrl of RSS_FEEDS) {
         try {
             const feed = await parser.parseURL(feedUrl);
             for (const item of feed.items || []) {
                 const title = item.title || '';
-                if (processedNews.has(title)) continue;
-                processedNews.add(title);
+                if (newsExists(title)) continue;
 
                 // Geopolitical Filter
                 const matchedKeyword = KEYWORDS.find(k => title.includes(k));
@@ -160,28 +165,52 @@ export async function runCycle() {
                     
                     insertNews(new Date().toISOString(), title, sentiment, item.link || '', asset);
 
+                    // Surprise Factor (Shock = Magnitude * (Actual - Consensus))
+                    // Mock consensus at 0 for simplicity
+                    const consensus = 0;
+                    const shock = Math.abs(sentiment - consensus);
+
                     // Trading Logic
-                    if (Math.abs(sentiment) > 0.3) { // Threshold for action
+                    if (shock > 0.3) { // Threshold for action based on surprise
+                        const currentOpenTrades = getOpenTrades() as any[];
+                        if (currentOpenTrades.length >= MAX_OPEN_POSITIONS) {
+                            console.log(`Max open positions (${MAX_OPEN_POSITIONS}) reached. Skipping trade.`);
+                            continue;
+                        }
+
                         const market = await getMarketData(asset);
                         if (!market.price) continue;
 
-                        // Angular Momentum (L) = v * r
-                        const L = market.velocity * market.r;
-                        
-                        // Torque (Ï) = Sentiment * Impact Factor (normalized)
-                        const torque = sentiment * 1.5;
-
-                        // Dynamic Stop-Loss based on Ï (Standard Deviation)
-                        const stopLossDistance = market.stdDev * 1.5;
+                        // Dynamic Stop-Loss based on intraday stdDev
+                        const stopLossDistance = market.stdDev * 0.5;
                         const stopLoss = sentiment > 0 
                             ? market.price - stopLossDistance 
                             : market.price + stopLossDistance;
 
+                        // Dynamic Take Profit (2:1 Reward/Risk)
+                        const b = 2; // odds
+                        const takeProfitDistance = stopLossDistance * b;
+                        const takeProfit = sentiment > 0
+                            ? market.price + takeProfitDistance
+                            : market.price - takeProfitDistance;
+
                         // Kelly Criterion for Position Sizing
-                        // f* = p - q / b (simplified: f = sentiment * 0.1)
-                        const kellyFraction = Math.min(Math.abs(sentiment) * 0.1, 0.2); // Max 20% of portfolio
+                        // f* = (bp - q) / b
+                        const p = 0.55; // Estimated historical win rate
+                        const q = 1 - p;
+                        const f = (b * p - q) / b;
+                        const kellyFraction = Math.min(f * Math.abs(sentiment), 0.2); // Max 20% of portfolio per trade
+                        
                         const port = getPortfolio() as { balance: number };
                         const positionValue = port.balance * kellyFraction;
+                        
+                        // VaR / Exposure Check
+                        const totalExposure = currentOpenTrades.reduce((sum, t) => sum + (t.entry_price * t.position_size), 0);
+                        if ((totalExposure + positionValue) > port.balance * MAX_PORTFOLIO_EXPOSURE) {
+                            console.log("Max portfolio exposure reached. Skipping trade.");
+                            continue;
+                        }
+
                         const positionSize = positionValue / market.price;
 
                         insertTrade(
@@ -192,8 +221,7 @@ export async function runCycle() {
                             market.price,
                             positionSize,
                             stopLoss,
-                            L,
-                            torque
+                            takeProfit
                         );
                         console.log(`Opened trade on ${asset} due to: ${title}`);
                     }

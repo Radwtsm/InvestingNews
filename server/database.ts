@@ -3,6 +3,7 @@ import Database from 'better-sqlite3';
 const db = new Database('trading.db');
 
 export function initDB() {
+    db.pragma('journal_mode = WAL');
     db.exec(`
         CREATE TABLE IF NOT EXISTS portfolio (
             id INTEGER PRIMARY KEY,
@@ -17,10 +18,9 @@ export function initDB() {
             entry_price REAL,
             position_size REAL,
             stop_loss REAL,
+            take_profit REAL,
             status TEXT,
-            pnl REAL,
-            angular_momentum REAL,
-            torque REAL
+            pnl REAL
         );
         CREATE TABLE IF NOT EXISTS news (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,15 +46,20 @@ export function updatePortfolio(newBalance: number) {
     db.prepare('UPDATE portfolio SET balance = ? WHERE id = 1').run(newBalance);
 }
 
+export function newsExists(title: string) {
+    const row = db.prepare('SELECT id FROM news WHERE title = ?').get(title);
+    return !!row;
+}
+
 export function insertNews(timestamp: string, title: string, sentiment: number, url: string, asset: string) {
     db.prepare('INSERT INTO news (timestamp, title, sentiment, url, asset) VALUES (?, ?, ?, ?, ?)').run(timestamp, title, sentiment, url, asset);
 }
 
-export function insertTrade(timestamp: string, news_title: string, sentiment: number, asset: string, entry_price: number, position_size: number, stop_loss: number, angular_momentum: number, torque: number) {
+export function insertTrade(timestamp: string, news_title: string, sentiment: number, asset: string, entry_price: number, position_size: number, stop_loss: number, take_profit: number) {
     db.prepare(`
-        INSERT INTO trades (timestamp, news_title, sentiment, asset, entry_price, position_size, stop_loss, status, pnl, angular_momentum, torque)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN', 0, ?, ?)
-    `).run(timestamp, news_title, sentiment, asset, entry_price, position_size, stop_loss, angular_momentum, torque);
+        INSERT INTO trades (timestamp, news_title, sentiment, asset, entry_price, position_size, stop_loss, take_profit, status, pnl)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', 0)
+    `).run(timestamp, news_title, sentiment, asset, entry_price, position_size, stop_loss, take_profit);
 }
 
 export function getOpenTrades() {
